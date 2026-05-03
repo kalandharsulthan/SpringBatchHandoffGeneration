@@ -1,0 +1,42 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;NON_KEYWORDS=VALUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  batch:
+    jdbc:
+      initialize-schema: always
+    job:
+      enabled: false
+
+handoff:
+  output:
+    directory: ${java.io.tmpdir}/handoff-test
+    file-prefix: TEST_HANDOFF_
+    file-suffix: .dat
+    encoding: UTF-8
+  batch:
+    chunk-size: 10
+    page-size: 10
+    skip-limit: 5
+  datasource:
+    select-clause: "account_no, customer_name, balance"
+    from-clause: "test_accounts"
+    where-clause: "status = 'ACTIVE'"
+    sort-key: account_no
+  fields:
+    - name: account_no
+      length: 20
+      alignment: LEFT
+      pad-char: " "
+    - name: customer_name
+      length: 40
+      alignment: LEFT
+      pad-char: " "
+    - name: balance
+      length: 15
+      alignment: RIGHT
+      pad-char: "0"
+      format: "%.2f"

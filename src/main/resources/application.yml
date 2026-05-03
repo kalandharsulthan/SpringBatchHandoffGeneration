@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: handoff-generation-service
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/prod_support_ai
+    username: ${DB_USERNAME:ai_user}
+    password: ${DB_PASSWORD:ai_password}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  batch:
+    job:
+      enabled: false
+    jdbc:
+      initialize-schema: always
+
+server:
+  port: 8080
+
+handoff:
+  output:
+    directory: /tmp/handoff-output
+    file-prefix: HANDOFF_
+    file-suffix: .dat
+    encoding: UTF-8
+  batch:
+    chunk-size: 1000
+    page-size: 1000
+    skip-limit: 10
+  datasource:
+    select-clause: "account_no, customer_name, balance"
+    from-clause: "accounts"
+    where-clause: "status = 'ACTIVE'"
+    sort-key: account_no
+  fields:
+    - name: account_no
+      length: 20
+      alignment: LEFT
+      pad-char: " "
+    - name: customer_name
+      length: 40
+      alignment: LEFT
+      pad-char: " "
+    - name: balance
+      length: 15
+      alignment: RIGHT
+      pad-char: "0"
+      format: "%.2f"
+
+logging:
+  level:
+    com.banking.handoff: DEBUG
+    org.springframework.batch: INFO
