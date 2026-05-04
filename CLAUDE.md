@@ -16,14 +16,19 @@ Reads data from PostgreSQL via configurable SQL query, formats rows as **fixed-w
 
 | File | Purpose |
 |---|---|
-| `RUNBOOK.md` | Step-by-step setup, run, API usage, runtime parameters, troubleshooting |
+| `RUNBOOK.md` | Step-by-step setup, run, API usage, runtime parameters, DB console, troubleshooting |
 | `ARCHITECTURE.md` | Data flow diagrams, component map, batch pipeline internals |
 | `CONFIGURATION.md` | Full `application.yml` property reference with examples |
+
+---
 
 ## Build Commands
 
 ```bash
-# Full build: compile + all tests + JaCoCo coverage check (≥80% instruction coverage)
+# Set Java 17 (required — system may default to a different version)
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+
+# Full build: compile + all tests + JaCoCo coverage check (≥80%)
 mvn clean verify
 
 # Tests only (skip coverage enforcement)
@@ -40,15 +45,23 @@ mvn test -Dtest=HandoffJobIntegrationTest
 mvn clean install -Djacoco.minimum.coverage=0
 ```
 
+---
+
 ## Run Locally
 
 ```bash
-export DB_USERNAME=bankinguser
-export DB_PASSWORD=changeit
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export DB_USERNAME=ai_user
+export DB_PASSWORD=ai_password
 mvn spring-boot:run
 ```
 
-Requires a running PostgreSQL instance. See `src/main/resources/application.yml` for DB URL.
+**Current Docker PostgreSQL setup:**
+- Container: `pgvector-db`
+- DB: `prod_support_ai`  |  User: `ai_user`  |  Password: `ai_password`  |  Port: `5432`
+- Output directory: `/tmp/handoff-output`
+
+---
 
 ## REST API (port 8080)
 
@@ -80,9 +93,9 @@ src/main/java/com/banking/handoff/
 │   ├── HandoffJobService.java            JobLauncher orchestration, status lookup
 │   └── dto/                              HandoffJobRequest, HandoffJobResponse, HandoffStatusResponse
 ├── batch/
-│   ├── reader/HandoffItemReader.java     JdbcPagingItemReader factory
+│   ├── reader/HandoffItemReader.java     JdbcPagingItemReader factory (no @Component)
 │   ├── processor/HandoffItemProcessor.java  Map<String,Object> → HandoffRecord
-│   └── writer/HandoffItemWriter.java     Delegating wrapper (tracks record count)
+│   └── writer/HandoffItemWriter.java     Delegating wrapper (no @Component)
 ├── domain/
 │   ├── FieldDefinition.java              name, length, alignment, padChar, format
 │   └── HandoffRecord.java                LinkedHashMap<String,String> — field order preserved
@@ -90,6 +103,17 @@ src/main/java/com/banking/handoff/
 │   └── FixedWidthFormatter.java          Pure Java pad/truncate — no Spring context
 └── exception/
     └── HandoffException.java
+
+src/test/java/com/banking/handoff/
+├── util/FixedWidthFormatterTest.java         14 parameterized cases
+├── batch/processor/HandoffItemProcessorTest  4 cases
+├── batch/writer/HandoffItemWriterTest        6 cases (includes Mockito spy)
+├── config/HandoffPropertiesTest              6 cases
+├── domain/FieldDefinitionTest                5 cases
+├── service/HandoffJobServiceTest             11 cases
+├── service/dto/HandoffDtoTest                4 cases
+├── controller/HandoffControllerTest          5 cases (@WebMvcTest)
+└── integration/HandoffJobIntegrationTest     4 cases (@SpringBatchTest + H2)
 ```
 
 ---
@@ -98,7 +122,6 @@ src/main/java/com/banking/handoff/
 
 ### SQL query must be split into clauses — not a single string
 `SqlPagingQueryProviderFactoryBean` requires separate `SELECT`, `FROM`, `WHERE` clauses.
-Configure in `application.yml` as:
 ```yaml
 handoff.datasource:
   select-clause: "col1, col2, col3"   # no SELECT keyword
@@ -114,80 +137,97 @@ Do NOT put a full SQL string here — it will silently break pagination restart.
 new JobBuilder("name", jobRepository).start(step).build();
 new StepBuilder("name", jobRepository).<In, Out>chunk(size, txManager)...build();
 ```
-Never copy Spring Batch 4 examples from Stack Overflow into this project.
+
+### @Component must NOT be on batch components
+`HandoffItemReader` and `HandoffItemWriter` do NOT have `@Component`. They are instantiated by `BatchJobConfig` as `@StepScope` beans. Adding `@Component` causes `BeanDefinitionOverrideException` at startup.
 
 ### @StepScope beans
-`handoffItemReader` and `handoffItemWriter` are `@StepScope` beans — they are created per step execution. Always inject them via `@Bean` method parameters in `BatchJobConfig`, never via `@Autowired` field injection. The `outputFilePath` job parameter is resolved via `@Value("#{jobParameters['outputFilePath']}")`.
+`handoffItemReader` and `handoffItemWriter` are `@StepScope` — created per step execution. Always inject via `@Bean` method parameters in `BatchJobConfig`, never via `@Autowired` field injection. The `outputFilePath` job parameter is resolved via `@Value("#{jobParameters['outputFilePath']}")`.
 
 ### Field order in HandoffRecord is guaranteed
-`HandoffRecord` uses `LinkedHashMap` internally. `HandoffItemProcessor` iterates `HandoffProperties.getFields()` in declaration order, which matches the output file column order. The field order in `application.yml` IS the file column order.
+`HandoffRecord` uses `LinkedHashMap` internally. `HandoffItemProcessor` iterates `HandoffProperties.getFields()` in declaration order, which matches the output file column order. **The field order in `application.yml` IS the file column order.**
 
 ### FixedWidthFormatter truncates from the right
-If a value is longer than `field.length`, characters beyond the limit are silently dropped from the right. This is standard banking mainframe behaviour. Do not change without coordinating with downstream consumers.
+If a value is longer than `field.length`, characters beyond the limit are silently dropped from the right. Standard banking mainframe behaviour.
 
-### Balance / numeric fields need `format`
-Without a `format` pattern, a `BigDecimal` value like `1234.56` becomes `"1234.56"` via `toString()`. For zero-padded right-aligned fields (e.g., length 15), that produces `"0000000001234.56"` only if `format: "%.2f"` is set. Always set `format` for decimal fields.
+### Numeric fields need `format`
+Without a `format` pattern, `BigDecimal("1234.5").toString()` = `"1234.5"` (no trailing zero). Always set `format: "%.2f"` for balance/amount fields to ensure consistent decimal places before zero-padding.
 
 ### PIT and JaCoCo must NOT run in the same Maven invocation
-Running both in a single `mvn test` causes bytecode instrumentation conflicts. CI should have two separate pipeline stages:
-1. `mvn clean verify` — runs JaCoCo
-2. `mvn pitest:mutationCoverage` — runs PIT (unit tests only; integration tests are excluded)
+Bytecode instrumentation conflict. CI must use two separate stages:
+1. `mvn clean verify` — JaCoCo
+2. `mvn pitest:mutationCoverage` — PIT (unit tests only; integration excluded)
 
 ### Integration tests use H2, not PostgreSQL
-`src/test/resources/application-test.yml` switches to H2 in `MODE=PostgreSQL`. The test DDL must use `BIGINT AUTO_INCREMENT` (H2) not `BIGSERIAL` (PostgreSQL). Do not use `SERIAL` or `GENERATED ALWAYS AS IDENTITY` in test SQL.
+`src/test/resources/application-test.yml` → H2 in `MODE=PostgreSQL`. Test DDL must use `BIGINT AUTO_INCREMENT`, not `BIGSERIAL`.
 
 ---
 
 ## Common Tasks
 
 ### Add a new output field
-1. Add a column to the SQL `select-clause` in `application.yml`
-2. Add a new `FieldDefinition` entry under `handoff.fields` in the correct position
+1. Add the column to `handoff.datasource.select-clause` in `application.yml`
+2. Add a `FieldDefinition` entry under `handoff.fields` in the correct position
 3. No code changes needed
 
 ### Change output directory or file naming
 Edit `handoff.output.directory`, `file-prefix`, `file-suffix` in `application.yml`. No code changes needed.
 
 ### Tune performance for high volume
-Increase `handoff.batch.chunk-size` and `handoff.batch.page-size` in `application.yml`. The sort-key column must have a database index — without it, each page causes a full table scan.
+Increase `handoff.batch.chunk-size` and `handoff.batch.page-size`. Ensure the sort-key column has a DB index.
+
+### Connect to PostgreSQL console
+```bash
+docker exec -it pgvector-db psql -U ai_user -d prod_support_ai
+```
 
 ### Add a new test
-- Unit tests: extend existing test classes or add to the same package, no Spring context needed for `FixedWidthFormatter`
-- Integration tests: add a method to `HandoffJobIntegrationTest` — it shares the H2 setup
+- Unit tests: no Spring context needed for `FixedWidthFormatter`, domain, and DTO classes
+- Integration tests: add a method to `HandoffJobIntegrationTest` — it shares the H2 + `@BeforeEach` setup
 - Always call `jobRepositoryTestUtils.removeJobExecutions()` in `@BeforeEach` for integration tests
 
 ---
 
 ## Environment Variables
 
-| Variable      | Default       | Description            |
-|---------------|---------------|------------------------|
-| `DB_USERNAME` | `bankinguser` | PostgreSQL username    |
-| `DB_PASSWORD` | `changeit`    | PostgreSQL password    |
+| Variable | Default | Description |
+|---|---|---|
+| `DB_USERNAME` | `ai_user` | PostgreSQL username |
+| `DB_PASSWORD` | `ai_password` | PostgreSQL password |
 
 ---
 
-## Test Coverage Goals
+## Test Coverage Results (actual)
 
-| Layer              | Test class                       | Type                  |
-|--------------------|----------------------------------|-----------------------|
-| Formatter          | `FixedWidthFormatterTest`        | Unit, parameterized   |
-| Processor          | `HandoffItemProcessorTest`       | Unit + Mockito        |
-| Writer             | `HandoffItemWriterTest`          | Unit + `@TempDir`     |
-| Service            | `HandoffJobServiceTest`          | Unit + Mockito        |
-| Controller         | `HandoffControllerTest`          | `@WebMvcTest`         |
-| End-to-end         | `HandoffJobIntegrationTest`      | `@SpringBatchTest` + H2 |
+| Layer | Test class | Tests | Type |
+|---|---|---|---|
+| Formatter | `FixedWidthFormatterTest` | 14 | Unit, parameterized |
+| Processor | `HandoffItemProcessorTest` | 4 | Unit + Mockito |
+| Writer | `HandoffItemWriterTest` | 6 | Unit + spy |
+| Properties | `HandoffPropertiesTest` | 6 | Unit |
+| Domain | `FieldDefinitionTest` | 5 | Unit |
+| Service | `HandoffJobServiceTest` | 11 | Unit + Mockito |
+| DTOs | `HandoffDtoTest` | 4 | Unit |
+| Controller | `HandoffControllerTest` | 5 | `@WebMvcTest` |
+| Integration | `HandoffJobIntegrationTest` | 4 | `@SpringBatchTest` + H2 |
+| **Total** | | **59** | |
 
-JaCoCo minimum: **80% instruction coverage** (enforced on `mvn verify`).  
-`HandoffGenerationApplication` is excluded from the JaCoCo check.
+| Coverage metric | Result |
+|---|---|
+| JaCoCo instruction | **97%** (threshold: 80%) |
+| JaCoCo branch | **85%** |
+| JaCoCo class | **100%** |
+| PIT mutation score | **97%** (72/74 killed) |
 
 ---
 
 ## Pitfalls to Avoid
 
 - **Never** use `JobBuilderFactory` / `StepBuilderFactory` — removed in Spring Batch 5
-- **Never** put a full SQL string in `handoff.datasource.query` — the property doesn't exist; split into clauses
-- **Never** inject `@StepScope` beans via field `@Autowired` — use method parameter injection in `@Configuration`
+- **Never** put a full SQL string in config — split into `select-clause`, `from-clause`, `where-clause`
+- **Never** add `@Component` to `HandoffItemReader` or `HandoffItemWriter` — causes `BeanDefinitionOverrideException`
+- **Never** inject `@StepScope` beans via field `@Autowired` — use `@Bean` method parameter injection
 - **Never** run PIT and JaCoCo together in one Maven command
 - **Never** use `BIGSERIAL` in test SQL schemas — use `BIGINT AUTO_INCREMENT` for H2 compatibility
 - **Never** use `String` concatenation with file path separators — use `Path.of(dir, file).toString()`
+- **Never** use `Map.of()` to build `HandoffRecord` field maps — unordered; use `putField()` instead
