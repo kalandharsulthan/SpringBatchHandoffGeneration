@@ -1,7 +1,5 @@
 package com.banking.handoff.controller;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -18,9 +16,10 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.banking.handoff.exception.HandoffException;
-import com.banking.handoff.service.HandoffJobService;
-import com.banking.handoff.service.dto.HandoffJobResponse;
+import com.banking.handoff.service.PipelineJobService;
 import com.banking.handoff.service.dto.HandoffStatusResponse;
+import com.banking.handoff.service.dto.PipelineJobResponse;
+import com.banking.handoff.service.dto.PipelineStatusResponse;
 
 @WebMvcTest(HandoffController.class)
 class HandoffControllerTest {
@@ -29,73 +28,75 @@ class HandoffControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
-    private HandoffJobService handoffJobService;
+    private PipelineJobService pipelineJobService;
 
     @Test
-    void shouldReturn202WhenJobLaunchedWithoutBody() throws Exception {
-        when(handoffJobService.generateHandoffFile(isNull()))
-                .thenReturn(new HandoffJobResponse(1L, "STARTING"));
+    void shouldReturn202WhenPipelineLaunched() throws Exception {
+        when(pipelineJobService.startPipeline())
+                .thenReturn(new PipelineJobResponse("run-uuid", "batch-uuid", "ACCEPTED"));
 
-        mockMvc.perform(post("/api/handoff/generate")
+        mockMvc.perform(post("/api/handoff/pipeline")
                         .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.jobExecutionId").value(1))
-                .andExpect(jsonPath("$.status").value("STARTING"));
+                .andExpect(jsonPath("$.runId").value("run-uuid"))
+                .andExpect(jsonPath("$.batchRunId").value("batch-uuid"))
+                .andExpect(jsonPath("$.status").value("ACCEPTED"));
     }
 
     @Test
-    void shouldReturn202WhenJobLaunchedWithBody() throws Exception {
-        when(handoffJobService.generateHandoffFile(any()))
-                .thenReturn(new HandoffJobResponse(5L, "STARTING"));
+    void shouldReturn202WhenPipelineLaunchedWithBody() throws Exception {
+        when(pipelineJobService.startPipeline())
+                .thenReturn(new PipelineJobResponse("run-uuid", "batch-uuid", "ACCEPTED"));
 
-        mockMvc.perform(post("/api/handoff/generate")
+        mockMvc.perform(post("/api/handoff/pipeline")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "outputFileName": "TEST_FILE.dat"
-                                }
-                                """))
+                        .content("{}"))
                 .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.jobExecutionId").value(5));
+                .andExpect(jsonPath("$.runId").isNotEmpty());
     }
 
     @Test
-    void shouldReturn200WithStatusForKnownJobExecution() throws Exception {
-        HandoffStatusResponse statusResponse = new HandoffStatusResponse(
+    void shouldReturn200WithPipelineStatus() throws Exception {
+        PipelineStatusResponse statusResponse = new PipelineStatusResponse(
+                "run-uuid", "batch-uuid", "COMPLETED", null,
+                1L, "COMPLETED",
+                2L, "COMPLETED", "/data/INSTRUMENT_20260507.dat",
+                3L, "COMPLETED", "/data/ACCOUNTING_20260507.dat");
+
+        when(pipelineJobService.getPipelineStatus("run-uuid")).thenReturn(statusResponse);
+
+        mockMvc.perform(get("/api/handoff/pipeline/run-uuid"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.runId").value("run-uuid"))
+                .andExpect(jsonPath("$.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.stagingJobExecutionId").value(1))
+                .andExpect(jsonPath("$.instrumentJobExecutionId").value(2))
+                .andExpect(jsonPath("$.accountingJobExecutionId").value(3));
+    }
+
+    @Test
+    void shouldReturn200WithIndividualJobStatus() throws Exception {
+        HandoffStatusResponse jobStatus = new HandoffStatusResponse(
                 42L, "COMPLETED", "COMPLETED",
-                "2026-05-03T10:00:00", "2026-05-03T10:05:00",
-                "/data/handoff/HANDOFF_20260503.dat",
+                "2026-05-07T10:00:00", "2026-05-07T10:05:00",
+                "/data/INSTRUMENT_20260507.dat",
                 List.of());
 
-        when(handoffJobService.getJobStatus(42L)).thenReturn(statusResponse);
+        when(pipelineJobService.getJobStatus(42L)).thenReturn(jobStatus);
 
         mockMvc.perform(get("/api/handoff/status/42"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.jobExecutionId").value(42))
-                .andExpect(jsonPath("$.status").value("COMPLETED"))
-                .andExpect(jsonPath("$.exitCode").value("COMPLETED"))
-                .andExpect(jsonPath("$.outputFilePath").value("/data/handoff/HANDOFF_20260503.dat"))
-                .andExpect(jsonPath("$.failureMessages").isEmpty());
+                .andExpect(jsonPath("$.status").value("COMPLETED"));
     }
 
     @Test
-    void shouldReturn400WhenJobExecutionNotFound() throws Exception {
-        when(handoffJobService.getJobStatus(999L))
-                .thenThrow(new HandoffException("Job execution not found: 999"));
+    void shouldReturn400WhenPipelineRunNotFound() throws Exception {
+        when(pipelineJobService.getPipelineStatus("unknown"))
+                .thenThrow(new HandoffException("Pipeline execution not found: unknown"));
 
-        mockMvc.perform(get("/api/handoff/status/999"))
+        mockMvc.perform(get("/api/handoff/pipeline/unknown"))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("Job execution not found: 999"));
-    }
-
-    @Test
-    void shouldReturn400WhenJobLaunchFails() throws Exception {
-        when(handoffJobService.generateHandoffFile(any()))
-                .thenThrow(new HandoffException("Failed to launch handoff job"));
-
-        mockMvc.perform(post("/api/handoff/generate")
-                        .contentType(MediaType.APPLICATION_JSON))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("Failed to launch handoff job"));
+                .andExpect(jsonPath("$.error").value("Pipeline execution not found: unknown"));
     }
 }

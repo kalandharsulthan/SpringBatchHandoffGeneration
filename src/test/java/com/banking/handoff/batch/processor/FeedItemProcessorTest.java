@@ -16,23 +16,18 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import com.banking.handoff.config.HandoffProperties;
 import com.banking.handoff.domain.FieldDefinition;
 import com.banking.handoff.domain.FieldDefinition.Alignment;
 import com.banking.handoff.domain.HandoffRecord;
 import com.banking.handoff.util.FixedWidthFormatter;
 
 @ExtendWith(MockitoExtension.class)
-class HandoffItemProcessorTest {
-
-    @Mock
-    private HandoffProperties properties;
+class FeedItemProcessorTest {
 
     @Mock
     private FixedWidthFormatter formatter;
 
-    private HandoffItemProcessor processor;
-
+    private FeedItemProcessor processor;
     private List<FieldDefinition> fields;
 
     @BeforeEach
@@ -41,9 +36,7 @@ class HandoffItemProcessorTest {
         fields.add(makeField("account_no", 20));
         fields.add(makeField("customer_name", 40));
         fields.add(makeField("balance", 15));
-
-        when(properties.getFields()).thenReturn(fields);
-        processor = new HandoffItemProcessor(properties, formatter);
+        processor = new FeedItemProcessor(fields, formatter);
     }
 
     @Test
@@ -82,12 +75,10 @@ class HandoffItemProcessorTest {
 
     @Test
     void shouldHandleMissingKeyInRow() throws Exception {
-        when(formatter.format(eq(null), any())).thenReturn("                    ");
         when(formatter.format(any(), any())).thenReturn("X".repeat(15));
 
         Map<String, Object> row = new HashMap<>();
         row.put("customer_name", "Test");
-        // account_no and balance are missing from the row
 
         HandoffRecord record = processor.process(row);
 

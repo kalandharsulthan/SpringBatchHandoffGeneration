@@ -1,30 +1,28 @@
 package com.banking.handoff.batch.processor;
 
+import java.util.List;
 import java.util.Map;
 
 import org.springframework.batch.item.ItemProcessor;
-import org.springframework.stereotype.Component;
 
-import com.banking.handoff.config.HandoffProperties;
 import com.banking.handoff.domain.FieldDefinition;
 import com.banking.handoff.domain.HandoffRecord;
 import com.banking.handoff.util.FixedWidthFormatter;
 
-@Component
-public class HandoffItemProcessor implements ItemProcessor<Map<String, Object>, HandoffRecord> {
+public class FeedItemProcessor implements ItemProcessor<Map<String, Object>, HandoffRecord> {
 
-    private final HandoffProperties properties;
+    private final List<FieldDefinition> fields;
     private final FixedWidthFormatter formatter;
 
-    public HandoffItemProcessor(HandoffProperties properties, FixedWidthFormatter formatter) {
-        this.properties = properties;
+    public FeedItemProcessor(List<FieldDefinition> fields, FixedWidthFormatter formatter) {
+        this.fields = fields;
         this.formatter = formatter;
     }
 
     @Override
     public HandoffRecord process(Map<String, Object> row) {
         HandoffRecord record = new HandoffRecord();
-        for (FieldDefinition field : properties.getFields()) {
+        for (FieldDefinition field : fields) {
             Object rawValue = row.get(field.getName());
             String formatted = formatter.format(rawValue, field);
             record.putField(field.getName(), formatted);

@@ -24,32 +24,84 @@ server:
 handoff:
   output:
     directory: /tmp/handoff-output
-    file-prefix: HANDOFF_
-    file-suffix: .dat
     encoding: UTF-8
+
   batch:
     chunk-size: 1000
     page-size: 1000
     skip-limit: 10
-  datasource:
-    select-clause: "account_no, customer_name, balance"
-    from-clause: "accounts"
-    where-clause: "status = 'ACTIVE'"
-    sort-key: account_no
-  fields:
-    - name: account_no
-      length: 20
-      alignment: LEFT
-      pad-char: " "
-    - name: customer_name
-      length: 40
-      alignment: LEFT
-      pad-char: " "
-    - name: balance
-      length: 15
-      alignment: RIGHT
-      pad-char: "0"
-      format: "%.2f"
+
+  # ── Job 1: Staging population ────────────────────────────────────────────
+  # Reads from the source table and inserts into handoff_staging.
+  # Each pipeline run is isolated by a unique batchRunId.
+  staging:
+    table-name: handoff_staging
+    source:
+      # account_type aliased to record_type — used by instrument/accounting WHERE filters
+      select-clause: "account_no, customer_name, balance, account_type as record_type"
+      from-clause: "accounts"
+      where-clause: "status = 'ACTIVE'"
+      sort-key: account_no
+    # Must match the aliased/actual columns inserted into the staging table DDL.
+    columns:
+      - account_no
+      - customer_name
+      - balance
+      - record_type
+
+  # ── Job 2: Instrument feed (SAVINGS accounts) ─────────────────────────────
+  # Reads SAVINGS rows from the staging table; writes fixed-width instrument file.
+  instrument:
+    enabled: true
+    output:
+      file-prefix: INSTRUMENT_
+      file-suffix: .dat
+    datasource:
+      select-clause: "account_no, customer_name, balance"
+      from-clause: "handoff_staging"
+      where-clause: "record_type = 'SAVINGS' AND batch_run_id = :batchRunId"
+      sort-key: account_no
+    fields:
+      - name: account_no
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: customer_name
+        length: 40
+        alignment: LEFT
+        pad-char: " "
+      - name: balance
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
+
+  # ── Job 3: Accounting feed (CURRENT accounts) ─────────────────────────────
+  # Reads CURRENT rows from the staging table; writes fixed-width accounting file.
+  accounting:
+    enabled: true
+    output:
+      file-prefix: ACCOUNTING_
+      file-suffix: .dat
+    datasource:
+      select-clause: "account_no, customer_name, balance"
+      from-clause: "handoff_staging"
+      where-clause: "record_type = 'CURRENT' AND batch_run_id = :batchRunId"
+      sort-key: account_no
+    fields:
+      - name: account_no
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: customer_name
+        length: 40
+        alignment: LEFT
+        pad-char: " "
+      - name: balance
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
 
 logging:
   level:

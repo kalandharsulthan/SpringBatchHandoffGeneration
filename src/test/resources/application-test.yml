@@ -14,29 +14,72 @@ spring:
 handoff:
   output:
     directory: ${java.io.tmpdir}/handoff-test
-    file-prefix: TEST_HANDOFF_
-    file-suffix: .dat
     encoding: UTF-8
+
   batch:
     chunk-size: 10
     page-size: 10
     skip-limit: 5
-  datasource:
-    select-clause: "account_no, customer_name, balance"
-    from-clause: "test_accounts"
-    where-clause: "status = 'ACTIVE'"
-    sort-key: account_no
-  fields:
-    - name: account_no
-      length: 20
-      alignment: LEFT
-      pad-char: " "
-    - name: customer_name
-      length: 40
-      alignment: LEFT
-      pad-char: " "
-    - name: balance
-      length: 15
-      alignment: RIGHT
-      pad-char: "0"
-      format: "%.2f"
+
+  staging:
+    table-name: test_handoff_staging
+    source:
+      select-clause: "account_no, customer_name, balance, record_type"
+      from-clause: "test_accounts"
+      where-clause: "status = 'ACTIVE'"
+      sort-key: account_no
+    columns:
+      - account_no
+      - customer_name
+      - balance
+      - record_type
+
+  instrument:
+    enabled: true
+    output:
+      file-prefix: TEST_INSTRUMENT_
+      file-suffix: .dat
+    datasource:
+      select-clause: "account_no, customer_name, balance"
+      from-clause: "test_handoff_staging"
+      where-clause: "record_type = 'INSTRUMENT' AND batch_run_id = :batchRunId"
+      sort-key: account_no
+    fields:
+      - name: account_no
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: customer_name
+        length: 40
+        alignment: LEFT
+        pad-char: " "
+      - name: balance
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
+
+  accounting:
+    enabled: true
+    output:
+      file-prefix: TEST_ACCOUNTING_
+      file-suffix: .dat
+    datasource:
+      select-clause: "account_no, customer_name, balance"
+      from-clause: "test_handoff_staging"
+      where-clause: "record_type = 'ACCOUNTING' AND batch_run_id = :batchRunId"
+      sort-key: account_no
+    fields:
+      - name: account_no
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: customer_name
+        length: 40
+        alignment: LEFT
+        pad-char: " "
+      - name: balance
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
