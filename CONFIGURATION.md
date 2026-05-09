@@ -1,7 +1,8 @@
 # Configuration Reference
 
 All runtime behaviour is driven by `src/main/resources/application.yml`.  
-No code changes are needed to reconfigure field layout, SQL query, performance tuning, or output naming.
+No code changes are needed to reconfigure field layout, performance tuning, or output naming.  
+Feed generation SQL queries are stored in the `feed_query_config` database table and can be updated at runtime without redeployment.
 
 ---
 
@@ -10,64 +11,94 @@ No code changes are needed to reconfigure field layout, SQL query, performance t
 ```yaml
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/banking
-    username: ${DB_USERNAME:bankinguser}   # override via env var
-    password: ${DB_PASSWORD:changeit}      # override via env var
+    url: jdbc:postgresql://localhost:5432/prod_support_ai
+    username: ${DB_USERNAME:ai_user}
+    password: ${DB_PASSWORD:ai_password}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 10
       minimum-idle: 2
-      connection-timeout: 30000            # ms
+      connection-timeout: 30000
 
   batch:
     job:
-      enabled: false                       # prevent auto-run at startup; use REST API
+      enabled: false          # MUST remain false — prevents auto-run at startup
     jdbc:
-      initialize-schema: always            # always=dev/test | never=production
+      initialize-schema: always  # always=dev/test | never=production
 
 handoff:
   output:
-    directory: /data/handoff               # REQUIRED — output directory on filesystem
-    file-prefix: HANDOFF_                  # prefix for auto-generated filenames
-    file-suffix: .dat                      # suffix for auto-generated filenames
-    encoding: UTF-8                        # file character encoding
+    directory: /tmp/handoff-output   # shared output root; individual feeds use sub-config
+    encoding: UTF-8
+
   batch:
-    chunk-size: 1000                       # rows per Spring Batch chunk (transaction boundary)
-    page-size: 1000                        # rows per JDBC page fetch
-    skip-limit: 10                         # max bad rows skipped before job fails
-  datasource:
-    select-clause: "col1, col2, col3"      # REQUIRED — columns after SELECT (no SELECT keyword)
-    from-clause: "table_name"              # REQUIRED — table/view after FROM (no FROM keyword)
-    where-clause: "status = 'ACTIVE'"      # optional — condition after WHERE (no WHERE keyword)
-    sort-key: col1                         # REQUIRED — must be in select-clause and DB-indexed
-  fields:
-    - name: col1                           # REQUIRED — must match a column in select-clause
-      length: 20                           # REQUIRED — exact character width in output file
-      alignment: LEFT                      # LEFT (pad right) | RIGHT (pad left) — default LEFT
-      pad-char: " "                        # padding character — default space
-      format:                              # optional Java format string (e.g. "%.2f" for decimals)
+    chunk-size: 1000
+    page-size: 1000
+    skip-limit: 10
+
+  instrument-staging:              # Population Job Step 1: instrument_header → staging
+    table-name: instrument_header_staging
+    source:
+      select-clause: "instrument_id, collection_number, ..."
+      from-clause: "instrument_header"
+      where-clause: "instrument_status = 'ACTIVE'"
+      sort-key: instrument_id
+    columns:
+      - instrument_id
+      - collection_number
+      # ... (must match select-clause output columns exactly)
+
+  accounting-staging:              # Population Job Step 2: accounting_entry → staging
+    table-name: accounting_staging
+    source:
+      select-clause: "instrument_number, collection_number, ..."
+      from-clause: "accounting_entry"
+      where-clause: "entry_status = 'PENDING'"
+      sort-key: instrument_number
+    columns:
+      - instrument_number
+      # ...
+
+  instrument:                      # Instrument Feed Job
+    enabled: true                  # set false to skip this job entirely
+    format: FIXED_WIDTH            # FIXED_WIDTH | CSV
+    output:
+      file-prefix: INSTRUMENT_FEED_
+      file-suffix: .dat
+    fields:
+      - name: instrument_id
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: instrument_amount
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
+      # ...
+
+  accounting:                      # Accounting Feed Job
+    enabled: true
+    format: CSV                    # FIXED_WIDTH | CSV
+    output:
+      file-prefix: ACCOUNTING_FEED_
+      file-suffix: .csv
+    fields:
+      - name: instrument_number
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      # ...
 ```
 
 ---
 
-## `handoff.output` — File Output Settings
+## `handoff.output` — Shared Output Settings
 
 | Property | Type | Default | Description |
 |---|---|---|---|
-| `directory` | String | — | **Required.** Absolute path to the output directory. Must exist and be writable. |
-| `file-prefix` | String | `HANDOFF_` | Prepended to auto-generated filenames. |
-| `file-suffix` | String | `.dat` | Appended to auto-generated filenames. |
-| `encoding` | String | `UTF-8` | File character encoding. Use `ISO-8859-1` for legacy mainframe consumers. |
-
-**Auto-generated filename pattern**: `{file-prefix}{yyyyMMdd_HHmmss}{file-suffix}`  
-Example: `HANDOFF_20260503_143022.dat`
-
-To use a custom filename, pass it in the request body:
-```json
-POST /api/handoff/generate
-{ "outputFileName": "ACCT_EXTRACT_20260503.dat" }
-```
-If provided, the full path becomes `{directory}/{outputFileName}`.
+| `directory` | String | — | **Required.** Absolute path to the output root. Must exist and be writable. |
+| `encoding` | String | `UTF-8` | File character encoding applied to all feed output files. Use `ISO-8859-1` for legacy mainframe consumers. |
 
 ---
 
@@ -75,115 +106,116 @@ If provided, the full path becomes `{directory}/{outputFileName}`.
 
 | Property | Type | Default | Description |
 |---|---|---|---|
-| `chunk-size` | int | `1000` | Rows processed per Spring Batch chunk. Each chunk is one database transaction. |
-| `page-size` | int | `1000` | Rows fetched per JDBC `SELECT ... LIMIT page-size OFFSET n`. |
-| `skip-limit` | int | `10` | Maximum rows that can be skipped (due to exceptions) before the job is failed. |
+| `chunk-size` | int | `1000` | Rows per Spring Batch chunk (one DB transaction boundary). |
+| `page-size` | int | `1000` | Rows per JDBC `SELECT ... LIMIT page-size`. |
+| `skip-limit` | int | `10` | Max bad rows skipped before the step fails. |
 
-**Recommended**: set `chunk-size == page-size`. This avoids partial page reads mid-transaction.
-
-**High-volume tuning**:
-- Increase both to `5000` for throughput; decrease if you get `OutOfMemoryError`
-- HikariCP `maximum-pool-size` should be at least 2 (one for the step datasource, one for Spring Batch metadata writes)
-- The `sort-key` column must have a B-tree index in PostgreSQL — without it, paging degrades to O(n²)
+**Recommended**: keep `chunk-size == page-size`. HikariCP `maximum-pool-size` must be at least 2 (one for the step datasource, one for Spring Batch metadata writes). The `sort-key` column must have a B-tree index — without it, paging degrades to O(n²).
 
 ---
 
-## `handoff.datasource` — SQL Query Configuration
+## `handoff.instrument-staging` and `handoff.accounting-staging` — Population Job
 
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `select-clause` | String | Yes | Column list — everything after `SELECT` up to `FROM`. No `SELECT` keyword. |
-| `from-clause` | String | Yes | Table/view name — everything after `FROM` up to `WHERE`. No `FROM` keyword. |
-| `where-clause` | String | No | Filter condition — everything after `WHERE`. No `WHERE` keyword. |
-| `sort-key` | String | Yes | Column used for `ORDER BY` in paging SQL. Must appear in `select-clause`. |
+Used by `populationJob` to copy source data into staging tables. Not related to feed query configuration.
 
-**Why split clauses?** `SqlPagingQueryProviderFactoryBean` constructs the paging SQL itself (e.g., `LIMIT/OFFSET` for PostgreSQL). It needs the clauses separately to inject the `ORDER BY` and pagination logic. Providing a full SQL string is not supported.
+| Property | Type | Description |
+|---|---|---|
+| `table-name` | String | Target staging table name |
+| `source.select-clause` | String | Columns to read (no `SELECT` keyword) |
+| `source.from-clause` | String | Source table/view (no `FROM` keyword) |
+| `source.where-clause` | String | Optional filter (no `WHERE` keyword) |
+| `source.sort-key` | String | Must appear in `select-clause` and be DB-indexed |
+| `columns` | List | Column names inserted into the staging table; must match the aliased names in `select-clause` |
 
-**Generated SQL example**:
+Each run is isolated by a `batch_run_id` UUID automatically injected into every staging row.
+
+---
+
+## `feed_query_config` Table — Externalized Feed Queries
+
+The instrument and accounting feed readers do **not** use `application.yml` for their queries. They read from this database table at step startup each run.
+
 ```sql
--- page 1
-SELECT account_no, customer_name, balance
-FROM accounts
-WHERE status = 'ACTIVE'
-ORDER BY account_no ASC
-LIMIT 1000 OFFSET 0
-
--- page 2
-LIMIT 1000 OFFSET 1000
+CREATE TABLE feed_query_config (
+    feed_name      VARCHAR(50)  NOT NULL PRIMARY KEY,
+    select_clause  TEXT         NOT NULL,
+    from_clause    TEXT         NOT NULL,
+    where_clause   TEXT,
+    sort_key       VARCHAR(50)  NOT NULL,
+    created_date   TIMESTAMP    DEFAULT now()
+);
 ```
 
-**Joins and subqueries** are supported — put them in `from-clause`:
-```yaml
-from-clause: "accounts a JOIN customers c ON a.customer_id = c.id"
+| feed_name | Consumed by |
+|---|---|
+| `INSTRUMENT_FEED` | `instrumentFeedJob` reader |
+| `ACCOUNTING_FEED` | `accountingFeedJob` reader |
+
+To change a query without redeployment:
+```sql
+UPDATE feed_query_config
+SET where_clause = 'batch_run_id = :batchRunId AND bank_code = ''BANKX'''
+WHERE feed_name = 'INSTRUMENT_FEED';
 ```
 
-**Multiple conditions**:
-```yaml
-where-clause: "status = 'ACTIVE' AND branch_code = '001'"
-```
+**Why split clauses?** `SqlPagingQueryProviderFactoryBean` constructs the paging SQL itself and needs clauses separately to inject `ORDER BY` and `LIMIT/OFFSET`. A full SQL string is not supported.
 
 ---
 
-## `handoff.fields` — Field Definition List
+## `handoff.instrument` and `handoff.accounting` — Feed Job Config
 
-Fields are processed in the order declared. **The declaration order = output file column order.**
+| Property | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Set `false` to skip this job; pipeline continues to the next |
+| `format` | Enum | `FIXED_WIDTH` | `FIXED_WIDTH` (fields concatenated) or `CSV` (fields comma-separated) |
+| `output.file-prefix` | String | `FEED_` | Prepended to the generated filename |
+| `output.file-suffix` | String | `.dat` | Appended to the generated filename |
+| `fields` | List | — | Field definitions — see below |
+
+**Generated filename pattern**: `{file-prefix}{yyyyMMdd_HHmmss}_{8-char batchRunId}{file-suffix}`
+
+### Field Definitions
 
 | Property | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `name` | String | Yes | — | Must exactly match a column name returned by `select-clause`. Case-sensitive. |
-| `length` | int | Yes | — | Fixed character width of this field in the output file. |
-| `alignment` | Enum | No | `LEFT` | `LEFT`: value left-aligned, padded on right. `RIGHT`: value right-aligned, padded on left. |
-| `pad-char` | char | No | ` ` (space) | Character used for padding. Use `"0"` for numeric fields. |
-| `format` | String | No | — | Java `String.format` pattern applied before padding. Use `"%.2f"` for decimal numbers. |
+| `name` | String | Yes | — | Must exactly match a column name returned by `select_clause` in `feed_query_config`. Case-sensitive. |
+| `length` | int | Yes | — | Fixed character width in the output file. |
+| `alignment` | Enum | No | `LEFT` | `LEFT`: value left-aligned, pad on right. `RIGHT`: value right-aligned, pad on left. |
+| `pad-char` | char | No | ` ` (space) | Padding character. Use `"0"` for numeric fields. |
+| `format` | String | No | — | Java `String.format` pattern applied before padding (e.g. `"%.2f"` for decimal numbers). |
 
-### Field Formatting Rules (applied in order)
+**Field formatting pipeline** (applied in order):
+1. Null input → treated as `""`
+2. `format` is set → `String.format(format, rawValue)` applied
+3. Result longer than `length` → right-truncated
+4. Padding applied (left or right depending on alignment)
 
-1. **Null input** → treated as empty string `""`
-2. **Format pattern** → if `format` is set, `String.format(format, rawValue)` is called
-3. **Truncation** → if result length > `length`, characters beyond `length` are dropped from the right
-4. **Padding**:
-   - `LEFT` alignment → value + padding characters appended on right
-   - `RIGHT` alignment → padding characters prepended on left + value
+**Declaration order = output column order.** Do not use `Map.of()` for field maps — it is unordered.
 
 ### Field Examples
 
 ```yaml
 # Text field: left-aligned, space-padded
-- name: account_no
+- name: instrument_id
   length: 20
   alignment: LEFT
   pad-char: " "
-# Input "ACC001" → "ACC001              " (14 spaces)
+# Input "INSTR-001" → "INSTR-001           " (11 spaces)
 
-# Numeric field: right-aligned, zero-padded, 2 decimal places
-- name: balance
+# Amount field: right-aligned, zero-padded, 2 decimal places
+- name: instrument_amount
   length: 15
   alignment: RIGHT
   pad-char: "0"
   format: "%.2f"
-# Input BigDecimal(1234.56) → "000000001234.56"
+# Input BigDecimal(15000) → "000000015000.00"
 
-# Integer field: right-aligned, zero-padded
-- name: sequence_no
-  length: 8
-  alignment: RIGHT
-  pad-char: "0"
-# Input 42 → "00000042"
-
-# Date field: format as YYYYMMDD then left-align
-- name: value_date
-  length: 8
+# Date string field: no format needed if already a VARCHAR in DB
+- name: business_date
+  length: 10
   alignment: LEFT
   pad-char: " "
-  format: "%tY%<tm%<td"
-# Input java.util.Date → "20260503"
-
-# Long text truncated to fit
-- name: description
-  length: 30
-  alignment: LEFT
-  pad-char: " "
-# Input "This is a very long description text" → "This is a very long descriptio" (truncated)
+# Input "2026-05-09" → "2026-05-09" (exact fit)
 ```
 
 ---
@@ -192,44 +224,47 @@ Fields are processed in the order declared. **The declaration order = output fil
 
 | Variable | Mapped to | Default | Notes |
 |---|---|---|---|
-| `DB_USERNAME` | `spring.datasource.username` | `bankinguser` | PostgreSQL login |
-| `DB_PASSWORD` | `spring.datasource.password` | `changeit` | PostgreSQL password |
+| `DB_USERNAME` | `spring.datasource.username` | `ai_user` | PostgreSQL login |
+| `DB_PASSWORD` | `spring.datasource.password` | `ai_password` | PostgreSQL password |
+
+Any `application.yml` key can also be overridden at runtime:
+```bash
+java -jar target/handoff-generation-1.0.0-SNAPSHOT.jar \
+  --handoff.batch.chunk-size=5000 \
+  --handoff.output.directory=/mnt/nas/handoff
+```
 
 ---
 
 ## Production Checklist
 
-Before deploying to production, update `application.yml`:
-
 ```yaml
 spring:
   batch:
     jdbc:
-      initialize-schema: never    # schema was created once manually
-
+      initialize-schema: never    # schema created once manually via schema-postgresql.sql
   datasource:
     hikari:
-      maximum-pool-size: 20       # tune based on load
+      maximum-pool-size: 20
 
 handoff:
   output:
-    directory: /app/handoff/output  # production mount path
+    directory: /app/handoff/output
   batch:
-    chunk-size: 5000              # tune for throughput
+    chunk-size: 5000
     page-size: 5000
 ```
 
 Also verify:
-- Output `directory` exists and the process user has write permission
-- `sort-key` column has a B-tree index
-- Spring Batch schema tables (`BATCH_*`) are present in the database (run `schema-postgresql.sql` from `spring-batch-core` JAR)
-- `spring.batch.job.enabled=false` remains set — job must only run via REST API, not at startup
+- Output `directory` exists and process user has write permission
+- All `sort-key` columns have B-tree indexes in PostgreSQL
+- Spring Batch schema tables (`BATCH_*`) are present
+- `feed_query_config` table exists and contains `INSTRUMENT_FEED` and `ACCOUNTING_FEED` rows
+- `spring.batch.job.enabled=false` remains set
 
 ---
 
 ## Test Configuration (`application-test.yml`)
-
-Used automatically when tests run with `@ActiveProfiles("test")`.
 
 ```yaml
 spring:
@@ -238,22 +273,25 @@ spring:
     driver-class-name: org.h2.Driver
     username: sa
     password: ""
-  batch:
-    jdbc:
-      initialize-schema: always
 
 handoff:
   output:
     directory: ${java.io.tmpdir}/handoff-test
-  datasource:
-    select-clause: "account_no, customer_name, balance"
-    from-clause: "test_accounts"
-    where-clause: "status = 'ACTIVE'"
-    sort-key: account_no
   batch:
     chunk-size: 10
     page-size: 10
+    skip-limit: 5
+  instrument-staging:
+    table-name: test_instrument_header_staging
+    source:
+      from-clause: "test_instrument_header"
+      # ...
+  accounting-staging:
+    table-name: test_accounting_staging
+    source:
+      from-clause: "test_accounting_entry"
+      # ...
 ```
 
-H2 runs in PostgreSQL compatibility mode. The `test_accounts` table is created and populated in `HandoffJobIntegrationTest.@BeforeEach`.  
-**DDL note**: use `BIGINT AUTO_INCREMENT` — do not use `BIGSERIAL` (PostgreSQL-only syntax not supported by H2).
+Tables are created and `feed_query_config` is seeded in `HandoffJobIntegrationTest.@BeforeEach`.  
+**DDL note**: use `BIGINT GENERATED BY DEFAULT AS IDENTITY` — **not `BIGSERIAL`** (unsupported in H2).

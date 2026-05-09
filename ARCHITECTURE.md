@@ -2,47 +2,65 @@
 
 ## Overview
 
-The service is a single Spring Batch job exposed via a REST API. Each call to `POST /api/handoff/generate` launches one job execution asynchronously. The job reads rows from PostgreSQL using paginated JDBC cursors, formats each row into a fixed-width text record, and streams the output to a file.
+The service is a three-job Spring Batch pipeline exposed via REST API. Each call to `POST /api/handoff/pipeline` launches the pipeline asynchronously. `PipelineJobService` runs all three jobs sequentially on a background thread using a synchronous `JobLauncher`, then reports the aggregated status via in-memory state. Callers poll `GET /api/handoff/pipeline/{runId}`.
 
 ---
 
-## Request Flow
+## Pipeline Flow
 
 ```
 HTTP Client
     │
     ▼
-HandoffController              POST /api/handoff/generate
-    │                          → returns { jobExecutionId, status: "STARTING" } immediately
+HandoffController              POST /api/handoff/pipeline
+    │                          → returns { runId, batchRunId, status: "ACCEPTED" } immediately
     ▼
-HandoffJobService              builds JobParameters (outputFilePath, run.id, additionalParams)
-    │                          calls asyncJobLauncher.run(handoffJob, params)
-    ▼
-TaskExecutorJobLauncher        non-blocking; spawns job on a new thread (SimpleAsyncTaskExecutor)
+PipelineJobService
+    │  startPipeline()  → stores PipelineExecution in ConcurrentHashMap, calls runPipelineAsync()
     │
-    ▼
-Spring Batch Job: handoffJob
-    │
-    └── Step: handoffStep      (chunk-oriented, chunk-size=1000, fault-tolerant, skip-limit=10)
+    └── @Async thread (SimpleAsyncTaskExecutor)
             │
-            ├── HandoffItemReader    reads page-by-page from PostgreSQL
-            │       └── JdbcPagingItemReader<Map<String,Object>>
-            │               SqlPagingQueryProviderFactoryBean
-            │               → generates: SELECT ... FROM ... WHERE ... ORDER BY ... LIMIT/OFFSET
+            ▼
+            PipelineJobService.runPipelineAsync()
+            │   uses syncJobLauncher (blocking, sequential)
             │
-            ├── HandoffItemProcessor  converts Map<String,Object> → HandoffRecord
-            │       └── FixedWidthFormatter  applies format pattern, truncates, pads each field
+            ├─ 1. populationJob ──────────────────────────────────────────────────┐
+            │       │                                                              │
+            │       ├── instrumentPopulationStep                                  │
+            │       │     reader: JdbcPagingItemReader(instrument_header)         │
+            │       │     writer: JdbcBatchItemWriter(instrument_header_staging)  │
+            │       │             + batch_run_id injected via @StepScope          │
+            │       │                                                              │
+            │       └── accountingPopulationStep                                  │
+            │             reader: JdbcPagingItemReader(accounting_entry)          │
+            │             writer: JdbcBatchItemWriter(accounting_staging)         │
+            │                     + batch_run_id injected                         │
+            │                                                               if FAILED
+            │   if COMPLETED                                               → stop, mark FAILED_STAGING
             │
-            └── FlatFileItemWriter<HandoffRecord>     (@StepScope)
-                    └── LineAggregator  String.join("", record.getFields().values())
-                    └── FileSystemResource(jobParameters['outputFilePath'])
-```
+            ├─ 2. instrumentFeedJob ───────────────────────────────────────────────┐
+            │       │                                                               │
+            │       └── instrumentFeedStep                                          │
+            │             reader: JdbcPagingItemReader                             │
+            │                     query from feed_query_config('INSTRUMENT_FEED')  │
+            │             processor: FeedItemProcessor → HandoffRecord             │
+            │             writer: FeedItemWriterFactory(FIXED_WIDTH) → .dat file   │
+            │                                                                if FAILED
+            │   if COMPLETED                                                → stop
+            │
+            └─ 3. accountingFeedJob
+                    │
+                    └── accountingFeedStep
+                          reader: JdbcPagingItemReader
+                                  query from feed_query_config('ACCOUNTING_FEED')
+                          processor: FeedItemProcessor → HandoffRecord
+                          writer: FeedItemWriterFactory(CSV) → .csv file
 
-After launch, the client polls:
-```
-HTTP Client  →  GET /api/handoff/status/{jobExecutionId}
-                HandoffController → HandoffJobService → JobExplorer
-                ← { status, exitCode, outputFilePath, startTime, endTime, failureMessages }
+GET /api/handoff/pipeline/{runId}  →  PipelineJobService.getPipelineStatus()
+                                   →  reads from ConcurrentHashMap<String, PipelineExecution>
+
+GET /api/handoff/status/{jobExecutionId}  →  JobExplorer.getJobExecution(id)
+                                          →  live status from Spring Batch metadata tables
 ```
 
 ---
@@ -52,148 +70,123 @@ HTTP Client  →  GET /api/handoff/status/{jobExecutionId}
 | Class | Package | Role |
 |---|---|---|
 | `HandoffGenerationApplication` | root | Spring Boot entry point, `@EnableConfigurationProperties` |
-| `HandoffProperties` | config | `@ConfigurationProperties(prefix="handoff")` — single source of truth for all config |
-| `BatchJobConfig` | config | Declares `Job`, `Step`, `@StepScope` reader/writer beans, async `JobLauncher` |
-| `HandoffController` | controller | REST endpoints + local `@ExceptionHandler` for `HandoffException` → HTTP 400 |
-| `HandoffJobService` | service | Builds `JobParameters`, calls `asyncJobLauncher.run()`, queries `JobExplorer` for status |
-| `HandoffJobRequest` | service/dto | Request body: `outputFileName` (optional), `additionalParams` (optional map) |
-| `HandoffJobResponse` | service/dto | Response: `jobExecutionId`, `status` |
-| `HandoffStatusResponse` | service/dto | Poll response: full job execution details |
-| `HandoffItemReader` | batch/reader | Plain class (no `@Component`): factory that builds `JdbcPagingItemReader` from config |
-| `HandoffItemProcessor` | batch/processor | `@Component` + `ItemProcessor`: maps DB row to `HandoffRecord` using field definitions |
-| `HandoffItemWriter` | batch/writer | Plain class (no `@Component`): delegates to `FlatFileItemWriter`, tracks record count |
-| `FixedWidthFormatter` | util | `@Component`, pure logic: apply format → truncate → pad to exact field width |
+| `FeedProperties` | config | `@ConfigurationProperties(prefix="handoff")` — all YAML config; has `instrumentStaging`, `accountingStaging`, `instrument`, `accounting` sub-configs |
+| `PopulationJobConfig` | config | Declares `populationJob` with two chained steps; wires `FeedItemReader` + `StagingItemWriter` factories per step |
+| `InstrumentFeedJobConfig` | config | Declares `instrumentFeedJob`; reader loads query from `FeedQueryConfigRepository`; writer from `FeedItemWriterFactory` |
+| `AccountingFeedJobConfig` | config | Same pattern as `InstrumentFeedJobConfig` for `accountingFeedJob` |
+| `SharedBatchConfig` | config | Two `JobLauncher` beans: `asyncJobLauncher` (for REST) and `syncJobLauncher` (for sequential pipeline chaining) |
+| `HandoffController` | controller | REST endpoints + `@ExceptionHandler(HandoffException)` → HTTP 400 |
+| `PipelineJobService` | service | `@Async` orchestrator; stores `PipelineExecution` objects in `ConcurrentHashMap`; uses `syncJobLauncher` to chain jobs |
+| `PipelineExecution` | service | In-memory VO: `runId`, `batchRunId`, per-job execution IDs, statuses, and output file paths |
+| `FeedQueryConfigRepository` | batch/reader | `@Component`; reads `SELECT/FROM/WHERE/SORT_KEY` from `feed_query_config` table; called inside `@StepScope` reader beans |
+| `FeedItemReader` | batch/reader | Plain factory class (no `@Component`); builds `JdbcPagingItemReader<Map<String,Object>>` from `DatasourceConfig` |
+| `FeedItemProcessor` | batch/processor | `ItemProcessor<Map<String,Object>, HandoffRecord>`; applies `FixedWidthFormatter` per `FieldDefinition` |
+| `StagingItemWriter` | batch/writer | Plain factory class; builds `JdbcBatchItemWriter` with dynamic INSERT statement; normalises Map keys to lowercase |
+| `FeedItemWriterFactory` | batch/writer | `@Component`; creates `FlatFileItemWriter<HandoffRecord>` for CSV or FIXED_WIDTH based on `FeedProperties.Format` |
+| `HandoffItemWriter` | batch/writer | Delegating wrapper around `FlatFileItemWriter`; tracks record count |
+| `FixedWidthFormatter` | util | `@Component`, pure logic: apply format string → truncate → pad to exact field width |
 | `FieldDefinition` | domain | Config model: `name`, `length`, `alignment` (LEFT/RIGHT), `padChar`, optional `format` |
 | `HandoffRecord` | domain | `LinkedHashMap<String,String>` — insertion order = file column order |
 | `HandoffException` | exception | Unchecked exception wrapping all job launch and lookup failures |
 
 ---
 
-## Data Flow Through the Batch Step
+## Data Flow: Instrument Feed Step
 
 ```
+feed_query_config row ('INSTRUMENT_FEED'):
+  select_clause: "instrument_id, collection_number, business_date, draw_reference_number, instrument_amount, bank_code"
+  from_clause:   "instrument_header_staging"
+  where_clause:  "batch_run_id = :batchRunId"
+  sort_key:      "instrument_id"
+
 PostgreSQL row (Map<String,Object>):
-  { "account_no": "ACC001", "customer_name": "John Smith", "balance": BigDecimal(1234.56) }
+  { "instrument_id": "INSTR-001", "collection_number": "COL-001",
+    "business_date": "2026-05-09", "draw_reference_number": "DRAW-001",
+    "instrument_amount": BigDecimal(15000.00), "bank_code": "BANKX" }
 
-HandoffItemProcessor iterates HandoffProperties.getFields() in declaration order:
+FeedItemProcessor iterates FeedProperties.getInstrument().getFields() in declaration order:
 
-  Field: account_no
-    rawValue   = "ACC001"
-    format     = null  →  toString() = "ACC001"
-    length     = 20, 6 < 20, no truncation
-    alignment  = LEFT  →  pad right with ' '
-    result     = "ACC001              "  (20 chars)
+  Field: instrument_id (length=20, LEFT, pad=' ')
+    → "INSTR-001           " (11 spaces)
 
-  Field: customer_name
-    rawValue   = "John Smith"
-    format     = null  →  "John Smith"
-    length     = 40, 10 < 40, no truncation
-    alignment  = LEFT  →  pad right with ' '
-    result     = "John Smith                              "  (40 chars)
+  Field: collection_number (length=20, LEFT, pad=' ')
+    → "COL-001             " (13 spaces)
 
-  Field: balance
-    rawValue   = BigDecimal(1234.56)
-    format     = "%.2f"  →  String.format("%.2f", 1234.56) = "1234.56"
-    length     = 15, 7 < 15, no truncation
-    alignment  = RIGHT  →  pad left with '0'
-    result     = "000000001234.56"  (15 chars)
+  Field: business_date (length=10, LEFT, pad=' ')
+    → "2026-05-09"
 
-HandoffRecord (LinkedHashMap preserves order):
-  { "account_no":    "ACC001              ",
-    "customer_name": "John Smith                              ",
-    "balance":       "000000001234.56" }
+  Field: draw_reference_number (length=30, LEFT, pad=' ')
+    → "DRAW-001                      " (22 spaces)
 
-LineAggregator → String.join("", values()):
-  "ACC001              John Smith                              000000001234.56"
-   └── 75 characters total (20 + 40 + 15)
+  Field: instrument_amount (length=15, RIGHT, pad='0', format="%.2f")
+    → "000000015000.00"
 
-Written as one line to the output file.
+  Field: bank_code (length=10, LEFT, pad=' ')
+    → "BANKX     " (5 spaces)
+
+HandoffRecord (LinkedHashMap):
+  { "instrument_id": "INSTR-001           ",
+    "collection_number": "COL-001             ",
+    "business_date": "2026-05-09",
+    "draw_reference_number": "DRAW-001                      ",
+    "instrument_amount": "000000015000.00",
+    "bank_code": "BANKX     " }
+
+FIXED_WIDTH: String.join("", values()) → 105-character line
+CSV:         String.join(",", values()) → comma-separated line
 ```
 
 ---
 
 ## Pagination Strategy
 
-`SqlPagingQueryProviderFactoryBean` auto-detects PostgreSQL and generates efficient paging SQL:
+`SqlPagingQueryProviderFactoryBean` auto-detects PostgreSQL and generates:
 
 ```sql
 -- Page 1
-SELECT account_no, customer_name, balance
-FROM accounts
-WHERE status = 'ACTIVE'
-ORDER BY account_no ASC
+SELECT instrument_id, collection_number, ...
+FROM instrument_header_staging
+WHERE batch_run_id = :batchRunId
+ORDER BY instrument_id ASC
 LIMIT 1000 OFFSET 0
-
--- Page 2
-LIMIT 1000 OFFSET 1000
 
 -- Page N
 LIMIT 1000 OFFSET (N-1)*1000
 ```
 
-| Config | Effect |
-|---|---|
-| `handoff.batch.page-size` | Rows fetched per JDBC call |
-| `handoff.batch.chunk-size` | Rows processed + written per Spring Batch transaction |
-| Keep `page-size == chunk-size` | Standard approach — avoids partial-page reads per transaction |
-
-**Performance requirement:** The `sort-key` column (`account_no`) **must have a B-tree index** in PostgreSQL. Without it, every page requires a full table scan — O(n²) for large datasets.
-
-**Restartability:** If the job fails mid-run, Spring Batch stores the last committed chunk offset in `BATCH_STEP_EXECUTION_CONTEXT`. On restart, `JdbcPagingItemReader` resumes from that offset.
+`chunk-size == page-size` avoids partial-page reads per transaction. The `sort-key` column must have a B-tree index. Spring Batch stores the last committed chunk offset in `BATCH_STEP_EXECUTION_CONTEXT` for restartability.
 
 ---
 
-## Async Job Execution
+## Async Execution Model
 
 ```
-POST /generate  ──→  asyncJobLauncher.run()  ──→  returns STARTING  ──→  202 response
-                              │
-                              └── new thread (SimpleAsyncTaskExecutor)
-                                        │
-                                        └── batch step runs to COMPLETED / FAILED
+POST /pipeline  →  PipelineJobService.startPipeline()
+                     stores PipelineExecution in ConcurrentHashMap
+                     calls runPipelineAsync(pe)
+                     returns runId immediately (202 Accepted)
 
-GET /status/{id}  ──→  JobExplorer.getJobExecution(id)  ──→  live status from DB
+@Async thread: populationJob → instrumentFeedJob → accountingFeedJob
+               (each via syncJobLauncher.run())
+
+GET /pipeline/{runId}  →  reads from ConcurrentHashMap
+                           never touches DB for pipeline-level status
+GET /status/{jobExecId}  →  JobExplorer.getJobExecution(id) from Spring Batch metadata tables
 ```
 
-- The POST endpoint returns within milliseconds regardless of dataset size
-- Job state is persisted to Spring Batch metadata tables — survives application restarts
-- Callers must poll `GET /status/{id}` to detect completion
+Job state is persisted to Spring Batch metadata tables, so individual step statuses survive restarts. Pipeline-level state (`PipelineExecution`) is in-memory only and is lost on restart.
 
 ---
 
 ## Configuration-Driven Design
 
-Everything about the output format lives in `application.yml`. No code changes needed to switch tables or add fields:
+Population queries and field format rules are in `application.yml`. Feed generation queries are in `feed_query_config`. No code changes are needed to:
 
-```yaml
-# Example: transaction handoff instead of account handoff
-handoff:
-  datasource:
-    select-clause: "txn_id, account_no, amount, txn_date"
-    from-clause: "transactions"
-    where-clause: "txn_date = CURRENT_DATE"
-    sort-key: txn_id
-  fields:
-    - name: txn_id
-      length: 12
-      alignment: RIGHT
-      pad-char: "0"
-    - name: account_no
-      length: 20
-      alignment: LEFT
-      pad-char: " "
-    - name: amount
-      length: 15
-      alignment: RIGHT
-      pad-char: "0"
-      format: "%.2f"
-    - name: txn_date
-      length: 10
-      alignment: LEFT
-      pad-char: " "
-```
-
-Field names in `fields[].name` must exactly match column names returned by `select-clause` (case-sensitive).
+- Change source table filters (update `instrument-staging.source.where-clause` or `feed_query_config` row)
+- Add or reorder output fields (add/reorder under `handoff.instrument.fields`)
+- Switch from fixed-width to CSV (change `handoff.instrument.format: CSV`)
+- Disable a feed (set `handoff.accounting.enabled: false`)
 
 ---
 
@@ -201,10 +194,10 @@ Field names in `fields[].name` must exactly match column names returned by `sele
 
 | Layer | Mechanism |
 |---|---|
-| Bad row during batch | Step is `.faultTolerant().skipLimit(10)` — up to 10 rows skipped per run, logged to `BATCH_STEP_EXECUTION` |
-| Job launch failure | `HandoffJobService` wraps all checked exceptions in `HandoffException` |
+| Bad row during batch | Step is `.faultTolerant().skipLimit(N)` — up to `skip-limit` rows skipped per step, recorded in `BATCH_STEP_EXECUTION` |
+| Job launch failure | `PipelineJobService` wraps exceptions in `HandoffException`; pipeline marks status `FAILED` |
 | REST error response | `HandoffController` `@ExceptionHandler` maps `HandoffException` → HTTP 400 `{ "error": "..." }` |
-| Unknown job ID | `HandoffJobService.getJobStatus()` throws `HandoffException("Job execution not found: {id}")` |
+| Unknown run/job ID | Throws `HandoffException("Pipeline/Job execution not found: {id}")` → 400 |
 
 ---
 
@@ -213,38 +206,41 @@ Field names in `fields[].name` must exactly match column names returned by `sele
 ```
 Unit tests (no Spring context)
 ────────────────────────────────────────────────────────────────────────
-FixedWidthFormatterTest     14 parameterized cases — null, empty, exact length,
-                            LEFT/RIGHT alignment, truncation, zero-pad, format patterns,
-                            blank format string
-FieldDefinitionTest         5 cases — getters, defaults, format field
-HandoffPropertiesTest       6 cases — nested Output/Batch/Datasource config, defaults
-HandoffDtoTest              4 cases — DTO getters for all response/request classes
+FixedWidthFormatterTest      14 parameterized cases — null, empty, LEFT/RIGHT,
+                             truncation, zero-pad, format patterns, blank format
+FieldDefinitionTest          5 cases — getters, defaults, format field
+FeedPropertiesTest           6 cases — Output/Batch/StagingConfig/FeedConfig, Format enum, defaults
+HandoffDtoTest               4 cases — DTO getters for all response/request classes
+FeedItemWriterFactoryTest    3 cases — CSV comma-join, FIXED_WIDTH concat, encoding respected
 
 Unit tests (Mockito)
 ────────────────────────────────────────────────────────────────────────
-HandoffItemProcessorTest    4 cases — field order, null values, missing keys
-HandoffItemWriterTest       6 cases — file content, rerun truncation, delegate spy
-                                      (verifies close() and update() are delegated)
-HandoffJobServiceTest       11 cases — launch, custom filename, additionalParams,
-                                       null/non-null times, failure messages, unknown ID
+FeedItemProcessorTest        4 cases — field order, null values, missing keys
+HandoffItemWriterTest        6 cases — delegation, record count, close/update forwarding
+FeedQueryConfigRepositoryTest 2 cases — query uses feedName as parameter, maps columns correctly
+PipelineJobServiceTest       8 cases — happy path, staging failure stops pipeline,
+                             disabled feeds skipped, unknown runId/execId throw
 
 Slice tests
 ────────────────────────────────────────────────────────────────────────
-HandoffControllerTest       5 cases — @WebMvcTest + MockMvc
-                            POST with/without body, GET status, error responses
+HandoffControllerTest        5 cases — @WebMvcTest + MockMvc
+                             POST pipeline, GET pipeline/{runId}, GET status/{id}, errors
 
 Integration tests
 ────────────────────────────────────────────────────────────────────────
-HandoffJobIntegrationTest   4 cases — @SpringBatchTest + @SpringBootTest + H2 (profile=test)
-                            Happy path (25 rows), empty result set,
-                            multiple runs (unique run.id), exact fixed-width format check
+HandoffJobIntegrationTest    4 cases — @SpringBatchTest + @SpringBootTest + H2 (profile=test)
+  populationJobShouldPopulateBothStagingTables
+  instrumentFeedJobShouldWriteFixedWidthFile   (105 chars/line, correct zero-padding)
+  accountingFeedJobShouldWriteCsvFile          (7 comma-separated fields per row)
+  populationJobShouldIsolateRunsByBatchRunId
 ```
 
 **H2 integration test setup:**
-- Profile `test` → `application-test.yml` → `jdbc:h2:mem:testdb;MODE=PostgreSQL;NON_KEYWORDS=VALUE`
-- `test_accounts` table created in `@BeforeEach` with `BIGINT AUTO_INCREMENT` (not `BIGSERIAL`)
-- Synchronous `TaskExecutorJobLauncher` injected in `@BeforeEach` (no polling needed in tests)
-- `JobRepositoryTestUtils.removeJobExecutions()` called before each test for isolation
+- Profile `test` → `application-test.yml` → H2 `MODE=PostgreSQL;NON_KEYWORDS=VALUE`
+- All 5 tables created in `@BeforeEach` with `BIGINT GENERATED BY DEFAULT AS IDENTITY`
+- `feed_query_config` seeded in `@BeforeEach` pointing to H2 test tables
+- Synchronous `TaskExecutorJobLauncher` used in tests (no polling needed)
+- `jobRepositoryTestUtils.removeJobExecutions()` called before each test for isolation
 - PIT excludes integration tests via `<excludedTestClasses>`
 
 ---
@@ -257,31 +253,24 @@ Auto-created on startup when `spring.batch.jdbc.initialize-schema: always`.
 |---|---|
 | `BATCH_JOB_INSTANCE` | One row per unique job name + parameters combination |
 | `BATCH_JOB_EXECUTION` | One row per job run attempt (maps to `jobExecutionId` in API) |
-| `BATCH_JOB_EXECUTION_PARAMS` | `outputFilePath`, `run.id`, `additionalParams` stored here |
-| `BATCH_STEP_EXECUTION` | Read/write/skip/commit counts, timing for `handoffStep` |
+| `BATCH_JOB_EXECUTION_PARAMS` | `batchRunId`, `outputFilePath`, `run.id` stored here |
+| `BATCH_STEP_EXECUTION` | Read/write/skip/commit counts per step |
 | `BATCH_STEP_EXECUTION_CONTEXT` | Restart checkpoint: current page offset |
-| `BATCH_JOB_EXECUTION_CONTEXT` | Job-level checkpoint data |
-
-**Useful monitoring queries:**
 
 ```sql
--- Recent job runs
-SELECT job_execution_id, status, exit_code, start_time, end_time
+-- Recent pipeline runs (all 3 jobs)
+SELECT job_execution_id, job_instance_id, status, exit_code, start_time, end_time
 FROM batch_job_execution
-ORDER BY start_time DESC
-LIMIT 10;
+ORDER BY start_time DESC LIMIT 15;
 
--- Job parameters (output file path)
-SELECT job_execution_id, parameter_name, parameter_value
+-- Output file paths
+SELECT job_execution_id, string_val
 FROM batch_job_execution_params
 WHERE parameter_name = 'outputFilePath'
 ORDER BY job_execution_id DESC;
 
--- Step statistics
-SELECT job_execution_id, read_count, write_count, skip_count, commit_count
+-- Step read/write counts
+SELECT job_execution_id, step_name, read_count, write_count, skip_count
 FROM batch_step_execution
-ORDER BY start_time DESC
-LIMIT 10;
+ORDER BY start_time DESC LIMIT 15;
 ```
-
-In production, set `spring.batch.jdbc.initialize-schema=never` and create the schema manually before first deployment.
