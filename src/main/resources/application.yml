@@ -31,77 +31,116 @@ handoff:
     page-size: 1000
     skip-limit: 10
 
-  # ── Job 1: Staging population ────────────────────────────────────────────
-  # Reads from the source table and inserts into handoff_staging.
-  # Each pipeline run is isolated by a unique batchRunId.
-  staging:
-    table-name: handoff_staging
+  # ── Job 1: Data population (two steps) ───────────────────────────────────
+  # Step 1: instrument_header → instrument_header_staging
+  instrument-staging:
+    table-name: instrument_header_staging
     source:
-      # account_type aliased to record_type — used by instrument/accounting WHERE filters
-      select-clause: "account_no, customer_name, balance, account_type as record_type"
-      from-clause: "accounts"
-      where-clause: "status = 'ACTIVE'"
-      sort-key: account_no
-    # Must match the aliased/actual columns inserted into the staging table DDL.
+      select-clause: "instrument_id, collection_number, business_date, draw_reference_number, instrument_amount, bank_code"
+      from-clause: "instrument_header"
+      where-clause: "instrument_status = 'ACTIVE'"
+      sort-key: instrument_id
     columns:
-      - account_no
-      - customer_name
-      - balance
-      - record_type
+      - instrument_id
+      - collection_number
+      - business_date
+      - draw_reference_number
+      - instrument_amount
+      - bank_code
 
-  # ── Job 2: Instrument feed (SAVINGS accounts) ─────────────────────────────
-  # Reads SAVINGS rows from the staging table; writes fixed-width instrument file.
+  # Step 2: accounting_entry → accounting_staging
+  accounting-staging:
+    table-name: accounting_staging
+    source:
+      select-clause: "instrument_number, collection_number, accounting_status, debit_amount, credit_amount, bank_code, value_date"
+      from-clause: "accounting_entry"
+      where-clause: "entry_status = 'PENDING'"
+      sort-key: instrument_number
+    columns:
+      - instrument_number
+      - collection_number
+      - accounting_status
+      - debit_amount
+      - credit_amount
+      - bank_code
+      - value_date
+
+  # ── Job 2: Instrument feed ─────────────────────────────────────────────────
+  # Query loaded at runtime from feed_query_config table (feed_name = 'INSTRUMENT_FEED').
+  # format: FIXED_WIDTH | CSV
   instrument:
     enabled: true
+    format: FIXED_WIDTH
     output:
-      file-prefix: INSTRUMENT_
+      file-prefix: INSTRUMENT_FEED_
       file-suffix: .dat
-    datasource:
-      select-clause: "account_no, customer_name, balance"
-      from-clause: "handoff_staging"
-      where-clause: "record_type = 'SAVINGS' AND batch_run_id = :batchRunId"
-      sort-key: account_no
     fields:
-      - name: account_no
+      - name: instrument_id
         length: 20
         alignment: LEFT
         pad-char: " "
-      - name: customer_name
-        length: 40
+      - name: collection_number
+        length: 20
         alignment: LEFT
         pad-char: " "
-      - name: balance
+      - name: business_date
+        length: 10
+        alignment: LEFT
+        pad-char: " "
+      - name: draw_reference_number
+        length: 30
+        alignment: LEFT
+        pad-char: " "
+      - name: instrument_amount
         length: 15
         alignment: RIGHT
         pad-char: "0"
         format: "%.2f"
+      - name: bank_code
+        length: 10
+        alignment: LEFT
+        pad-char: " "
 
-  # ── Job 3: Accounting feed (CURRENT accounts) ─────────────────────────────
-  # Reads CURRENT rows from the staging table; writes fixed-width accounting file.
+  # ── Job 3: Accounting feed ─────────────────────────────────────────────────
+  # Query loaded at runtime from feed_query_config table (feed_name = 'ACCOUNTING_FEED').
+  # format: FIXED_WIDTH | CSV
   accounting:
     enabled: true
+    format: CSV
     output:
-      file-prefix: ACCOUNTING_
-      file-suffix: .dat
-    datasource:
-      select-clause: "account_no, customer_name, balance"
-      from-clause: "handoff_staging"
-      where-clause: "record_type = 'CURRENT' AND batch_run_id = :batchRunId"
-      sort-key: account_no
+      file-prefix: ACCOUNTING_FEED_
+      file-suffix: .csv
     fields:
-      - name: account_no
+      - name: instrument_number
         length: 20
         alignment: LEFT
         pad-char: " "
-      - name: customer_name
-        length: 40
+      - name: collection_number
+        length: 20
         alignment: LEFT
         pad-char: " "
-      - name: balance
+      - name: accounting_status
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: debit_amount
         length: 15
         alignment: RIGHT
         pad-char: "0"
         format: "%.2f"
+      - name: credit_amount
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
+      - name: bank_code
+        length: 10
+        alignment: LEFT
+        pad-char: " "
+      - name: value_date
+        length: 10
+        alignment: LEFT
+        pad-char: " "
 
 logging:
   level:

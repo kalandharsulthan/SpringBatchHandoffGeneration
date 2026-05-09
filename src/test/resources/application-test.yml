@@ -21,65 +21,104 @@ handoff:
     page-size: 10
     skip-limit: 5
 
-  staging:
-    table-name: test_handoff_staging
+  instrument-staging:
+    table-name: test_instrument_header_staging
     source:
-      select-clause: "account_no, customer_name, balance, record_type"
-      from-clause: "test_accounts"
-      where-clause: "status = 'ACTIVE'"
-      sort-key: account_no
+      select-clause: "instrument_id, collection_number, business_date, draw_reference_number, instrument_amount, bank_code"
+      from-clause: "test_instrument_header"
+      where-clause: "instrument_status = 'ACTIVE'"
+      sort-key: instrument_id
     columns:
-      - account_no
-      - customer_name
-      - balance
-      - record_type
+      - instrument_id
+      - collection_number
+      - business_date
+      - draw_reference_number
+      - instrument_amount
+      - bank_code
+
+  accounting-staging:
+    table-name: test_accounting_staging
+    source:
+      select-clause: "instrument_number, collection_number, accounting_status, debit_amount, credit_amount, bank_code, value_date"
+      from-clause: "test_accounting_entry"
+      where-clause: "entry_status = 'PENDING'"
+      sort-key: instrument_number
+    columns:
+      - instrument_number
+      - collection_number
+      - accounting_status
+      - debit_amount
+      - credit_amount
+      - bank_code
+      - value_date
 
   instrument:
     enabled: true
+    format: FIXED_WIDTH
     output:
-      file-prefix: TEST_INSTRUMENT_
+      file-prefix: TEST_INSTRUMENT_FEED_
       file-suffix: .dat
-    datasource:
-      select-clause: "account_no, customer_name, balance"
-      from-clause: "test_handoff_staging"
-      where-clause: "record_type = 'INSTRUMENT' AND batch_run_id = :batchRunId"
-      sort-key: account_no
     fields:
-      - name: account_no
+      - name: instrument_id
         length: 20
         alignment: LEFT
         pad-char: " "
-      - name: customer_name
-        length: 40
+      - name: collection_number
+        length: 20
         alignment: LEFT
         pad-char: " "
-      - name: balance
+      - name: business_date
+        length: 10
+        alignment: LEFT
+        pad-char: " "
+      - name: draw_reference_number
+        length: 30
+        alignment: LEFT
+        pad-char: " "
+      - name: instrument_amount
         length: 15
         alignment: RIGHT
         pad-char: "0"
         format: "%.2f"
+      - name: bank_code
+        length: 10
+        alignment: LEFT
+        pad-char: " "
 
   accounting:
     enabled: true
+    format: CSV
     output:
-      file-prefix: TEST_ACCOUNTING_
-      file-suffix: .dat
-    datasource:
-      select-clause: "account_no, customer_name, balance"
-      from-clause: "test_handoff_staging"
-      where-clause: "record_type = 'ACCOUNTING' AND batch_run_id = :batchRunId"
-      sort-key: account_no
+      file-prefix: TEST_ACCOUNTING_FEED_
+      file-suffix: .csv
     fields:
-      - name: account_no
+      - name: instrument_number
         length: 20
         alignment: LEFT
         pad-char: " "
-      - name: customer_name
-        length: 40
+      - name: collection_number
+        length: 20
         alignment: LEFT
         pad-char: " "
-      - name: balance
+      - name: accounting_status
+        length: 20
+        alignment: LEFT
+        pad-char: " "
+      - name: debit_amount
         length: 15
         alignment: RIGHT
         pad-char: "0"
         format: "%.2f"
+      - name: credit_amount
+        length: 15
+        alignment: RIGHT
+        pad-char: "0"
+        format: "%.2f"
+      - name: bank_code
+        length: 10
+        alignment: LEFT
+        pad-char: " "
+      - name: value_date
+        length: 10
+        alignment: LEFT
+        pad-char: " "

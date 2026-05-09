@@ -53,52 +53,47 @@ class FeedPropertiesTest {
     }
 
     @Test
-    void shouldReturnStagingConfig() {
+    void shouldReturnInstrumentStagingConfig() {
         FeedProperties.DatasourceConfig src = new FeedProperties.DatasourceConfig();
-        src.setSelectClause("a, b");
-        src.setFromClause("source_table");
-        src.setSortKey("a");
+        src.setSelectClause("instrument_id, collection_number");
+        src.setFromClause("instrument_header");
+        src.setSortKey("instrument_id");
 
         FeedProperties.StagingConfig staging = new FeedProperties.StagingConfig();
-        staging.setTableName("my_staging");
+        staging.setTableName("instrument_header_staging");
         staging.setSource(src);
-        staging.setColumns(List.of("a", "b"));
+        staging.setColumns(List.of("instrument_id", "collection_number"));
 
         FeedProperties props = new FeedProperties();
-        props.setStaging(staging);
+        props.setInstrumentStaging(staging);
 
-        assertThat(props.getStaging().getTableName()).isEqualTo("my_staging");
-        assertThat(props.getStaging().getColumns()).containsExactly("a", "b");
-        assertThat(props.getStaging().getSource().getFromClause()).isEqualTo("source_table");
+        assertThat(props.getInstrumentStaging().getTableName()).isEqualTo("instrument_header_staging");
+        assertThat(props.getInstrumentStaging().getColumns()).containsExactly("instrument_id", "collection_number");
+        assertThat(props.getInstrumentStaging().getSource().getFromClause()).isEqualTo("instrument_header");
     }
 
     @Test
     void shouldReturnFeedConfig() {
         FieldDefinition field = new FieldDefinition();
-        field.setName("account_no");
+        field.setName("instrument_id");
         field.setLength(20);
 
         FeedProperties.FeedOutput feedOutput = new FeedProperties.FeedOutput();
-        feedOutput.setFilePrefix("INSTR_");
+        feedOutput.setFilePrefix("INSTRUMENT_FEED_");
         feedOutput.setFileSuffix(".dat");
-
-        FeedProperties.DatasourceConfig ds = new FeedProperties.DatasourceConfig();
-        ds.setSelectClause("account_no");
-        ds.setFromClause("handoff_staging");
-        ds.setSortKey("account_no");
 
         FeedProperties.FeedConfig feed = new FeedProperties.FeedConfig();
         feed.setEnabled(true);
+        feed.setFormat(FeedProperties.Format.CSV);
         feed.setOutput(feedOutput);
-        feed.setDatasource(ds);
         feed.setFields(List.of(field));
 
         FeedProperties props = new FeedProperties();
         props.setInstrument(feed);
 
         assertThat(props.getInstrument().isEnabled()).isTrue();
-        assertThat(props.getInstrument().getOutput().getFilePrefix()).isEqualTo("INSTR_");
+        assertThat(props.getInstrument().getFormat()).isEqualTo(FeedProperties.Format.CSV);
+        assertThat(props.getInstrument().getOutput().getFilePrefix()).isEqualTo("INSTRUMENT_FEED_");
         assertThat(props.getInstrument().getFields()).hasSize(1);
-        assertThat(props.getInstrument().getDatasource().getFromClause()).isEqualTo("handoff_staging");
     }
 }

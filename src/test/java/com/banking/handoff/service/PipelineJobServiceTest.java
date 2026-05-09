@@ -34,7 +34,7 @@ import com.banking.handoff.service.dto.PipelineStatusResponse;
 class PipelineJobServiceTest {
 
     @Mock private JobLauncher syncJobLauncher;
-    @Mock private Job stagingJob;
+    @Mock private Job populationJob;
     @Mock private Job instrumentFeedJob;
     @Mock private Job accountingFeedJob;
     @Mock private JobExplorer jobExplorer;
@@ -60,17 +60,17 @@ class PipelineJobServiceTest {
         when(properties.getInstrument()).thenReturn(instrumentConfig);
         when(instrumentConfig.isEnabled()).thenReturn(true);
         when(instrumentConfig.getOutput()).thenReturn(instrumentOutput);
-        when(instrumentOutput.getFilePrefix()).thenReturn("INSTRUMENT_");
+        when(instrumentOutput.getFilePrefix()).thenReturn("INSTRUMENT_FEED_");
         when(instrumentOutput.getFileSuffix()).thenReturn(".dat");
 
         when(properties.getAccounting()).thenReturn(accountingConfig);
         when(accountingConfig.isEnabled()).thenReturn(true);
         when(accountingConfig.getOutput()).thenReturn(accountingOutput);
-        when(accountingOutput.getFilePrefix()).thenReturn("ACCOUNTING_");
-        when(accountingOutput.getFileSuffix()).thenReturn(".dat");
+        when(accountingOutput.getFilePrefix()).thenReturn("ACCOUNTING_FEED_");
+        when(accountingOutput.getFileSuffix()).thenReturn(".csv");
 
         service = new PipelineJobService(
-                syncJobLauncher, stagingJob, instrumentFeedJob,
+                syncJobLauncher, populationJob, instrumentFeedJob,
                 accountingFeedJob, jobExplorer, properties);
     }
 
@@ -86,7 +86,7 @@ class PipelineJobServiceTest {
     @Test
     void runPipelineAsyncShouldCompleteWhenAllJobsSucceed() throws Exception {
         JobExecution completedExec = completedExecution(10L);
-        when(syncJobLauncher.run(eq(stagingJob), any(JobParameters.class))).thenReturn(completedExec);
+        when(syncJobLauncher.run(eq(populationJob), any(JobParameters.class))).thenReturn(completedExec);
         when(syncJobLauncher.run(eq(instrumentFeedJob), any(JobParameters.class))).thenReturn(completedExecution(11L));
         when(syncJobLauncher.run(eq(accountingFeedJob), any(JobParameters.class))).thenReturn(completedExecution(12L));
 
@@ -102,7 +102,7 @@ class PipelineJobServiceTest {
     @Test
     void runPipelineAsyncShouldStopAfterStagingFailure() throws Exception {
         JobExecution failedExec = failedExecution(10L);
-        when(syncJobLauncher.run(eq(stagingJob), any(JobParameters.class))).thenReturn(failedExec);
+        when(syncJobLauncher.run(eq(populationJob), any(JobParameters.class))).thenReturn(failedExec);
 
         PipelineExecution pe = new PipelineExecution("run-2", "batch-2");
         service.runPipelineAsync(pe);
@@ -115,7 +115,7 @@ class PipelineJobServiceTest {
     @Test
     void runPipelineAsyncShouldSkipInstrumentWhenDisabled() throws Exception {
         when(instrumentConfig.isEnabled()).thenReturn(false);
-        when(syncJobLauncher.run(eq(stagingJob), any())).thenReturn(completedExecution(10L));
+        when(syncJobLauncher.run(eq(populationJob), any())).thenReturn(completedExecution(10L));
         when(syncJobLauncher.run(eq(accountingFeedJob), any())).thenReturn(completedExecution(12L));
 
         PipelineExecution pe = new PipelineExecution("run-3", "batch-3");
@@ -127,7 +127,7 @@ class PipelineJobServiceTest {
 
     @Test
     void getPipelineStatusShouldReturnStatusForKnownRunId() throws Exception {
-        when(syncJobLauncher.run(eq(stagingJob), any())).thenReturn(completedExecution(1L));
+        when(syncJobLauncher.run(eq(populationJob), any())).thenReturn(completedExecution(1L));
         when(syncJobLauncher.run(eq(instrumentFeedJob), any())).thenReturn(completedExecution(2L));
         when(syncJobLauncher.run(eq(accountingFeedJob), any())).thenReturn(completedExecution(3L));
 

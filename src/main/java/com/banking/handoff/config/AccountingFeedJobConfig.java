@@ -12,21 +12,31 @@ import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.item.database.JdbcPagingItemReader;
 import org.springframework.batch.item.file.FlatFileItemWriter;
-import org.springframework.batch.item.file.builder.FlatFileItemWriterBuilder;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.FileSystemResource;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import com.banking.handoff.batch.processor.FeedItemProcessor;
 import com.banking.handoff.batch.reader.FeedItemReader;
+import com.banking.handoff.batch.reader.FeedQueryConfigRepository;
+import com.banking.handoff.batch.writer.FeedItemWriterFactory;
 import com.banking.handoff.domain.HandoffRecord;
 import com.banking.handoff.util.FixedWidthFormatter;
 
 @Configuration
 public class AccountingFeedJobConfig {
+
+    private final FeedQueryConfigRepository feedQueryConfigRepository;
+    private final FeedItemWriterFactory feedItemWriterFactory;
+
+    public AccountingFeedJobConfig(
+            FeedQueryConfigRepository feedQueryConfigRepository,
+            FeedItemWriterFactory feedItemWriterFactory) {
+        this.feedQueryConfigRepository = feedQueryConfigRepository;
+        this.feedItemWriterFactory = feedItemWriterFactory;
+    }
 
     @Bean
     public Job accountingFeedJob(
@@ -45,7 +55,6 @@ public class AccountingFeedJobConfig {
             @Qualifier("accountingItemReader") JdbcPagingItemReader<Map<String, Object>> reader,
             @Qualifier("accountingItemProcessor") FeedItemProcessor processor,
             @Qualifier("accountingItemWriter") FlatFileItemWriter<HandoffRecord> writer) {
-
         return new StepBuilder("accountingFeedStep", jobRepository)
                 .<Map<String, Object>, HandoffRecord>chunk(
                         properties.getBatch().getChunkSize(), transactionManager)
@@ -64,10 +73,12 @@ public class AccountingFeedJobConfig {
             DataSource dataSource,
             FeedProperties properties,
             @Value("#{jobParameters['batchRunId']}") String batchRunId) {
+        FeedProperties.DatasourceConfig dsConfig =
+                feedQueryConfigRepository.findByFeedName("ACCOUNTING_FEED");
         return new FeedItemReader().reader(
                 "accountingItemReader",
                 dataSource,
-                properties.getAccounting().getDatasource(),
+                dsConfig,
                 properties.getBatch().getPageSize(),
                 Map.of("batchRunId", batchRunId));
     }
@@ -83,12 +94,10 @@ public class AccountingFeedJobConfig {
     public FlatFileItemWriter<HandoffRecord> accountingItemWriter(
             @Value("#{jobParameters['outputFilePath']}") String outputFilePath,
             FeedProperties properties) {
-        return new FlatFileItemWriterBuilder<HandoffRecord>()
-                .name("accountingItemWriter")
-                .resource(new FileSystemResource(outputFilePath))
-                .lineAggregator(item -> String.join("", item.getFields().values()))
-                .encoding(properties.getOutput().getEncoding())
-                .shouldDeleteIfExists(true)
-                .build();
+        return feedItemWriterFactory.create(
+                "accountingItemWriter",
+                outputFilePath,
+                properties.getAccounting().getFormat(),
+                properties.getOutput().getEncoding());
     }
 }

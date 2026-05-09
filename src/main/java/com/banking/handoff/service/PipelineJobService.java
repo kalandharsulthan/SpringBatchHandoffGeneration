@@ -31,7 +31,7 @@ public class PipelineJobService {
             DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
 
     private final JobLauncher syncJobLauncher;
-    private final Job stagingJob;
+    private final Job populationJob;
     private final Job instrumentFeedJob;
     private final Job accountingFeedJob;
     private final JobExplorer jobExplorer;
@@ -41,13 +41,13 @@ public class PipelineJobService {
 
     public PipelineJobService(
             @Qualifier("syncJobLauncher") JobLauncher syncJobLauncher,
-            Job stagingJob,
-            Job instrumentFeedJob,
-            Job accountingFeedJob,
+            @Qualifier("populationJob") Job populationJob,
+            @Qualifier("instrumentFeedJob") Job instrumentFeedJob,
+            @Qualifier("accountingFeedJob") Job accountingFeedJob,
             JobExplorer jobExplorer,
             FeedProperties properties) {
         this.syncJobLauncher = syncJobLauncher;
-        this.stagingJob = stagingJob;
+        this.populationJob = populationJob;
         this.instrumentFeedJob = instrumentFeedJob;
         this.accountingFeedJob = accountingFeedJob;
         this.jobExplorer = jobExplorer;
@@ -66,7 +66,7 @@ public class PipelineJobService {
     @Async
     public void runPipelineAsync(PipelineExecution pe) {
         try {
-            runStaging(pe);
+            runPopulation(pe);
 
             if (!"COMPLETED".equals(pe.getStagingStatus())) {
                 pe.setStatus("FAILED_STAGING");
@@ -97,13 +97,13 @@ public class PipelineJobService {
         }
     }
 
-    private void runStaging(PipelineExecution pe) throws Exception {
+    private void runPopulation(PipelineExecution pe) throws Exception {
         JobParameters params = new JobParametersBuilder()
                 .addString("batchRunId", pe.getBatchRunId())
                 .addLong("run.id", System.currentTimeMillis())
                 .toJobParameters();
 
-        JobExecution exec = syncJobLauncher.run(stagingJob, params);
+        JobExecution exec = syncJobLauncher.run(populationJob, params);
         pe.setStagingJobExecutionId(exec.getId());
         pe.setStagingStatus(exec.getStatus().name());
     }

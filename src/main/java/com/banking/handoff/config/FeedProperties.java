@@ -24,7 +24,10 @@ public class FeedProperties {
     private Batch batch = new Batch();
 
     @Valid @NotNull
-    private StagingConfig staging = new StagingConfig();
+    private StagingConfig instrumentStaging = new StagingConfig();
+
+    @Valid @NotNull
+    private StagingConfig accountingStaging = new StagingConfig();
 
     @Valid @NotNull
     private FeedConfig instrument = new FeedConfig();
@@ -38,8 +41,11 @@ public class FeedProperties {
     public Batch getBatch() { return batch; }
     public void setBatch(Batch batch) { this.batch = batch; }
 
-    public StagingConfig getStaging() { return staging; }
-    public void setStaging(StagingConfig staging) { this.staging = staging; }
+    public StagingConfig getInstrumentStaging() { return instrumentStaging; }
+    public void setInstrumentStaging(StagingConfig instrumentStaging) { this.instrumentStaging = instrumentStaging; }
+
+    public StagingConfig getAccountingStaging() { return accountingStaging; }
+    public void setAccountingStaging(StagingConfig accountingStaging) { this.accountingStaging = accountingStaging; }
 
     public FeedConfig getInstrument() { return instrument; }
     public void setInstrument(FeedConfig instrument) { this.instrument = instrument; }
@@ -47,7 +53,11 @@ public class FeedProperties {
     public FeedConfig getAccounting() { return accounting; }
     public void setAccounting(FeedConfig accounting) { this.accounting = accounting; }
 
-    // ── Output ──────────────────────────────────────────────────────────────
+    // ── Format ────────────────────────────────────────────────────────────────
+
+    public enum Format { CSV, FIXED_WIDTH }
+
+    // ── Output ───────────────────────────────────────────────────────────────
 
     public static class Output {
 
@@ -86,7 +96,7 @@ public class FeedProperties {
     public static class StagingConfig {
 
         @NotBlank
-        private String tableName = "handoff_staging";
+        private String tableName;
 
         @Valid @NotNull
         private DatasourceConfig source = new DatasourceConfig();
@@ -110,11 +120,10 @@ public class FeedProperties {
 
         private boolean enabled = true;
 
-        @Valid @NotNull
-        private FeedOutput output = new FeedOutput();
+        private Format format = Format.FIXED_WIDTH;
 
         @Valid @NotNull
-        private DatasourceConfig datasource = new DatasourceConfig();
+        private FeedOutput output = new FeedOutput();
 
         @NotEmpty
         private List<@Valid FieldDefinition> fields;
@@ -122,11 +131,11 @@ public class FeedProperties {
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
+        public Format getFormat() { return format; }
+        public void setFormat(Format format) { this.format = format; }
+
         public FeedOutput getOutput() { return output; }
         public void setOutput(FeedOutput output) { this.output = output; }
-
-        public DatasourceConfig getDatasource() { return datasource; }
-        public void setDatasource(DatasourceConfig datasource) { this.datasource = datasource; }
 
         public List<FieldDefinition> getFields() { return fields; }
         public void setFields(List<FieldDefinition> fields) { this.fields = fields; }
